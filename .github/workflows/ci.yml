@@ -1,0 +1,42 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: requirements-dev.txt
+
+      - name: Install dependencies
+        run: pip install -r requirements-dev.txt pyyaml
+
+      - name: Pytest (hermetic, no network)
+        run: python -m pytest tests/ -q
+
+      - name: Shell syntax
+        run: |
+          bash -n infra/onprem/check_connectivity.sh
+          bash -n lab/lab_setup_onprem.sh
+
+      - name: YAML syntax
+        run: |
+          python - <<'PY'
+          import glob, yaml
+          files = glob.glob("infra/**/*.yml", recursive=True) + glob.glob(".github/**/*.yml", recursive=True)
+          for f in files:
+              yaml.safe_load(open(f))
+              print("ok", f)
+          PY
+
+      - name: Docker build
+        run: docker build -t onprem-mcp-server:ci .

@@ -1,0 +1,12 @@
+__pycache__/
+*.pyc
+.venv/
+.env
+.env.*
+!.env.example
+data/
+*.db
+.pytest_cache/
+# strongSwan secrets must never be committed
+infra/onprem/strongswan/*.secrets
+infra/onprem/strongswan/swanctl.local.conf

@@ -1,0 +1,66 @@
+# On-prem MCP server for the customer data center.
+#
+#   cp .env.example .env            # set MCP_API_KEYS and the bind addresses
+#   docker compose up -d --build                    # plain HTTP :8080 (see README before using in production)
+#   docker compose --profile tls up -d --build      # adds Caddy TLS on :8443 (recommended for the gateway connector)
+#
+# The Private MCP Gateway reaches this host through the VPN Site-to-Site tunnel (see ../greennode/README.md).
+name: onprem-mcp
+
+services:
+  mcp:
+    build:
+      context: ../..
+      dockerfile: Dockerfile
+    image: ${MCP_IMAGE:-onprem-mcp-server:latest}
+    restart: unless-stopped
+    env_file: .env
+    environment:
+      PORT: "8080"
+      DB_PATH: /data/erp.db
+    ports:
+      # Bind to an internal address only. With the tls profile use MCP_BIND_ADDR=127.0.0.1.
+      - "${MCP_BIND_ADDR:?set MCP_BIND_ADDR in .env}:${MCP_PORT:-8080}:8080"
+    volumes:
+      - mcp_data:/data
+    read_only: true
+    tmpfs:
+      - /tmp
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    healthcheck:
+      # python:3.12-slim has no curl, so probe with Python.
+      test:
+        - CMD
+        - python
+        - -c
+        - "import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://127.0.0.1:8080/health', timeout=3).status == 200 else 1)"
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
+
+  # Optional TLS terminator. Enable with `--profile tls`.
+  caddy:
+    profiles: ["tls"]
+    image: caddy:2
+    restart: unless-stopped
+    depends_on:
+      mcp:
+        condition: service_healthy
+    environment:
+      CADDY_SITE: ${CADDY_SITE:?set CADDY_SITE in .env}
+    ports:
+      - "${TLS_BIND_ADDR:?set TLS_BIND_ADDR in .env}:${TLS_PORT:-8443}:8443"
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy_data:/data
+      # To use a certificate from your enterprise CA instead of `tls internal`:
+      # uncomment the next line and the `tls /certs/...` line in the Caddyfile.
+      # - ./certs:/certs:ro
+
+volumes:
+  mcp_data:
+  caddy_data:
