@@ -21,12 +21,13 @@ Transport: MCP streamable HTTP at /mcp, liveness probe at GET /health, port from
 
 Authentication (fail-closed): /mcp requires an API key.
   - MCP_API_KEYS="key1,key2"  (several keys at once allow zero-downtime rotation)
-  - Every key must be at least 32 characters and must not be an example placeholder. If any entry is
-    rejected, /mcp answers 503 and the reason is logged at startup (the server never falls back to open).
+  - Every key must be at least 32 characters and must not be a placeholder (contain `<`, `>` or `change-me`,
+    in any letter case). If any entry is rejected, /mcp answers 503 and the reason is logged at startup
+    (the server never falls back to open).
   - Header `X-Api-Key: <key>` or `Authorization: Bearer <key>`
   - No key configured -> /mcp answers 503 (the server never opens itself up). Only for local
     development set ALLOW_ANONYMOUS=true.
-  - /health is always open (load balancers and health probes) and says nothing but "ok".
+  - /health is always open (load balancers and health probes): {"status": "ok", "tools": <number of tools>}.
   Behind an MCP Gateway connector, Outbound Auth = API Key adds the header `X-Api-Key`; the agent never
   sees the key.
 
@@ -81,8 +82,7 @@ SERVER_NAME = "onprem-erp-mcp"
 DB_PATH = os.environ.get("DB_PATH", "data/erp.db")
 
 MIN_KEY_LENGTH = 32
-# Values that ship in example files. They are valid-looking strings, so they are rejected by name.
-PLACEHOLDER_KEYS = frozenset({"change-me-run-openssl-rand-hex-32"})
+PLACEHOLDER_MARKER = "change-me"  # the example env files ship `change-me-run-openssl-rand-hex-32`
 
 
 def _load_api_keys() -> list[str]:
@@ -96,8 +96,8 @@ def _key_problems(keys: list[str]) -> list[str]:
     for index, key in enumerate(keys, start=1):
         if "<" in key or ">" in key:
             reason = "looks like an unfilled placeholder (contains < or >)"
-        elif key.casefold() in PLACEHOLDER_KEYS:
-            reason = "is a placeholder from an example file"
+        elif PLACEHOLDER_MARKER in key.casefold():
+            reason = f'contains "{PLACEHOLDER_MARKER}" (a placeholder from an example file)'
         elif len(key) < MIN_KEY_LENGTH:
             reason = f"is shorter than {MIN_KEY_LENGTH} characters"
         else:
@@ -503,8 +503,8 @@ def _auth_mode() -> str:
 
 @mcp.custom_route("/health", methods=["GET"])
 async def health(_request):
-    """Liveness only: it deliberately reveals nothing about keys, auth mode or tools."""
-    return JSONResponse({"status": "ok"})
+    """Liveness only: the tool count is all it says (nothing about keys or the auth mode)."""
+    return JSONResponse({"status": "ok", "tools": len(await mcp.list_tools())})
 
 
 # streamable_http_app() returns a Starlette app (with the custom routes above) whose lifespan runs the MCP

@@ -67,6 +67,7 @@ REJECTED_KEYS = [
     "<openssl rand -hex 32>",
     "change-me-run-openssl-rand-hex-32",
     "CHANGE-ME-RUN-OPENSSL-RAND-HEX-32",
+    "0123456789abcdef-Change-Me-0123456789abcdef",
     "a" * 31,
     "k3y",
     "x" * 40 + "<",
@@ -121,12 +122,13 @@ def test_gateway_host_header_is_accepted(client):
 # ----------------------------- /health -----------------------------
 
 
-def test_health_is_open_and_reveals_nothing(m, client, monkeypatch):
-    assert client.get("/health").json() == {"status": "ok"}
-    monkeypatch.setattr(m, "API_KEYS", [])  # locked server: still just "ok"
-    assert client.get("/health").json() == {"status": "ok"}
+def test_health_is_open_and_reveals_nothing_about_keys(m, client, monkeypatch):
+    expected = {"status": "ok", "tools": 6}
+    assert client.get("/health").json() == expected
+    monkeypatch.setattr(m, "API_KEYS", [])  # locked server: same answer, nothing about keys or auth mode
+    assert client.get("/health").json() == expected
     monkeypatch.setattr(m, "API_KEYS", ["<placeholder>"])
-    assert client.get("/health").json() == {"status": "ok"}
+    assert client.get("/health").json() == expected
 
 
 # ----------------------------- malformed request bodies -----------------------------

@@ -165,7 +165,7 @@ GreenNode "Support IPSEC Configuration" page and the pfSense demo; see the table
 ## Security checklist
 
 - [ ] **Least-privilege policy**: one Policy Group rule per agent, explicit `erp__<tool>` actions, no `["*"]`. Without any Policy Group, all `tools/call` return 403 by design.
-- [ ] **API key**: generated with `openssl rand -hex 32`, stored in Access Control and in the server `.env` (`chmod 600`), never in git or in agent code. The server is **fail-closed**: no `MCP_API_KEYS` means `503` on `/mcp`, and so does any key that is shorter than 32 characters, contains `<` or `>`, or is a placeholder from an example file (the reason, never the key, is logged at startup).
+- [ ] **API key**: generated with `openssl rand -hex 32`, stored in Access Control and in the server `.env` (`chmod 600`), never in git or in agent code. The server is **fail-closed**: no `MCP_API_KEYS` means `503` on `/mcp`, and so does any key that is shorter than 32 characters, contains `<` or `>`, or contains `change-me` (any letter case, the placeholder of the example files) (the reason, never the key, is logged at startup).
 - [ ] **Key rotation without downtime**: list two keys (`MCP_API_KEYS=old,new`), switch the Access Control provider to `new`, then remove `old`.
 - [ ] **Firewall source restriction**: IKE, NAT-T and ESP only from the GreenNode VPN IP; the MCP port only from `172.30.0.0/16` and the VPC CIDR (verify which source the data center really sees); everything else dropped ([`infra/onprem/firewall/nftables.conf`](infra/onprem/firewall/nftables.conf)).
 - [ ] **No exposure**: the server binds to an internal address only (`MCP_BIND_ADDR`), never `0.0.0.0` on a host with a public interface; no public port forwarding.

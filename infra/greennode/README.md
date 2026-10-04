@@ -190,7 +190,7 @@ exactly the key set in `MCP_API_KEYS` on the on-prem server.
 openssl rand -hex 32     # use the output both in the data center (.env) and here
 ```
 
-The server refuses keys shorter than 32 characters and the placeholders of the example files (`/mcp` then answers `503`).
+The server refuses keys shorter than 32 characters and any key that contains `<`, `>` or `change-me` (the placeholder of the example files); `/mcp` then answers `503`.
 
 The gateway attaches this key when it calls the server; agents never see it. For rotation, give the server two keys
 (`MCP_API_KEYS=old,new`), change the provider value to the new key, then remove the old key from the server.
