@@ -7,6 +7,5 @@ __pycache__/
 data/
 *.db
 .pytest_cache/
-# strongSwan secrets must never be committed
-infra/onprem/strongswan/*.secrets
-infra/onprem/strongswan/swanctl.local.conf
+# strongSwan pre-shared keys must never be committed (the tracked template is greennode.secrets.conf.example)
+infra/onprem/strongswan/*.secrets.conf

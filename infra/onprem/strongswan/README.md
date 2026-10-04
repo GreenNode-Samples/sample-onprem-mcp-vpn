@@ -56,13 +56,20 @@ sudoedit /etc/swanctl/swanctl.conf                      # addresses, ids, CIDRs
 sudoedit /etc/swanctl/conf.d/greennode.secrets.conf     # the real pre-shared key
 ```
 
+A pre-shared key that contains quotes, backslashes or other special characters is safest hex encoded: write
+`secret = 0x<hex>` with `printf '%s' "$PSK" | od -An -v -tx1 | tr -d ' \n'` (the `lab/` script does this).
+A copy kept inside this repository folder as `*.secrets.conf` is git-ignored.
+
 ## 5. Start and verify
 
 ```bash
-sudo swanctl --load-all                                 # loads connections and secrets; start_action=start initiates the tunnel
-sudo swanctl --initiate --child greennode-vpc           # explicit initiate (useful when GreenNode does not start the negotiation)
+sudo swanctl --load-all                                 # loads connections and secrets; start_action=start starts the tunnel
 sudo swanctl --list-sas
 ```
+
+Do not also run `swanctl --initiate`: `start_action = start` already negotiates the tunnel when the configuration is
+loaded and keeps retrying (`keyingtries = 0`) while the GreenNode VPN is not `Active` yet, so a second initiate would race
+with it and can leave a duplicate SA.
 
 A healthy tunnel shows `ESTABLISHED` for the IKE SA and `INSTALLED, TUNNEL` for the child SA, with the expected
 traffic selectors:
