@@ -63,8 +63,14 @@ sudo -E ./lab/lab_setup_onprem.sh
 ```
 
 The script installs strongSwan, renders [`../infra/onprem/strongswan/swanctl.conf`](../infra/onprem/strongswan/swanctl.conf) with
-your values, creates `lan0`, starts the tunnel, then builds and runs the MCP server (and Caddy TLS on `:8443`, unless
-`WITH_TLS=0`). The API key is generated into `/root/.onprem-mcp-lab.env`.
+your values, creates `lan0` and loads the configuration (its `start_action=start` brings the tunnel up by itself, so
+there is no manual initiate), then builds and runs the MCP server. The API key is generated into
+`/root/.onprem-mcp-lab.env` and handed to the container through `--env-file`.
+
+| `WITH_TLS` | What listens where |
+|---|---|
+| `1` (default) | Caddy on `192.168.10.20:8443` (HTTPS). The MCP server listens on `127.0.0.1:8080` only, so nothing but Caddy can reach it and its `X-Forwarded-For` header (`TRUST_FORWARDED_FOR=true`, trusted from loopback only) cannot be forged |
+| `0` | Plain MCP server on `192.168.10.20:8080`, no Caddy |
 
 If the IKE or ESP proposals do not match the VPN policy shown by GreenNode, `journalctl -u strongswan` shows
 `NO_PROPOSAL_CHOSEN`: edit the proposals in the repo template (they come from the supported list in the GreenNode docs)
@@ -91,11 +97,12 @@ Copy [`../infra/onprem/check_connectivity.sh`](../infra/onprem/check_connectivit
 the lab VM (`sudo cat /root/.onprem-mcp-lab.env`):
 
 ```bash
-MCP_API_KEY=<key> ./check_connectivity.sh 192.168.10.20 8080 http
-MCP_API_KEY=<key> INSECURE=1 ./check_connectivity.sh 192.168.10.20 8443 https
+MCP_API_KEY=<key> INSECURE=1 ./check_connectivity.sh 192.168.10.20 8443 https   # WITH_TLS=1 (default)
+MCP_API_KEY=<key> ./check_connectivity.sh 192.168.10.20 8080 http                # WITH_TLS=0
 ```
 
-Both must end with `RESULT: PASS (3/3)`. Typical failures:
+Run the line that matches your `WITH_TLS` choice (the HTTPS one by default); it must end with `RESULT: PASS (3/3)`.
+Typical failures:
 
 | Failing step | Likely cause |
 |---|---|
@@ -127,15 +134,23 @@ the **verify with GreenNode** list.
 ### 8. Clean up
 
 ```bash
-sudo ./lab/lab_setup_onprem.sh teardown     # on the lab VM
+sudo ./lab/lab_setup_onprem.sh teardown     # on the lab VM; safe to run twice
 ```
+
+It removes the MCP and Caddy containers with their volumes and the image it built, stops the tunnel, restores the
+strongSwan `swanctl.conf` you had before (`swanctl.conf.pre-lab`), removes the pre-shared key file from `/etc/swanctl/conf.d`, removes
+`/etc/sysctl.d/99-ipsec.conf` (the forwarding values go back to their defaults at the next reboot) and deletes `lan0`.
+It leaves the strongSwan packages and `/root/.onprem-mcp-lab.env` in place. If you applied the firewall file,
+`sudo nft delete table inet onprem_mcp` removes it.
 
 Then delete the gateway and connector, the Access Control provider, the VPN (it is billed), the route table entry and the lab VM.
 
 ## Limits of the lab
 
 - The lab "data center" has no corporate firewall or router: apply [`../infra/onprem/firewall/nftables.conf`](../infra/onprem/firewall/nftables.conf)
-  to practice the source restriction (edit the `define` lines first; the script does not install it).
+  to practice the source restriction (the script does not install it). Edit the `define` lines first and **set `ADMIN_NET`
+  to your own IP address**: the input policy is drop and SSH is allowed only from `ADMIN_NET`, so with the example value
+  you lock yourself out of the VM. If you do not want to risk that, skip the firewall in the lab.
 - Docker uses host networking in the lab so that IPsec policies see the real addresses; a production host with published
   ports is described in [`../infra/onprem/README.md`](../infra/onprem/README.md).
 - A VM with a public IP behind cloud NAT depends on NAT-T behavior: verify with GreenNode if the tunnel does not come up.
