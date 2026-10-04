@@ -92,7 +92,7 @@ upgrading this sample, delete the old database (`data/erp.db`, or the `mcp_data`
   `10.20.0.0/16` for the VPC and `192.168.0.0/16` for the data center; replace them with your ranges).
 - GreenNode support to activate the **private connection** between your VPC and AgentBase (only privately connected VPCs
   are offered when creating a Private gateway). The VPC needs DNS resolution enabled.
-- Docker (server), Python 3.12 (tests and client example), `bash` and `curl` (connectivity check).
+- Docker (server), Python 3.10 or newer (tests and client example; CI and the image use 3.12), `bash` and `curl` (connectivity check).
 
 ## Quick start (local)
 
@@ -119,20 +119,24 @@ MCP_URL=http://127.0.0.1:8080/mcp MCP_API_KEY="$MCP_KEY" python examples/mcp_cli
   --call find_employee --args '{"query":"nguyen"}'
 ```
 
-Or in your own code:
+The client prints every content block and the structured content, and exits with status 1 when the call failed or the
+tool reported an error. Or in your own code:
 
 ```python
 import asyncio, os
 from mcp import ClientSession
-from mcp.client.streamable_http import streamablehttp_client
+from mcp.client.streamable_http import streamable_http_client
 
 async def main():
-    async with streamablehttp_client("http://127.0.0.1:8080/mcp",
-                                     headers={"X-Api-Key": os.environ["MCP_KEY"]}) as (r, w, _):
-        async with ClientSession(r, w) as session:
-            await session.initialize()
-            print([t.name for t in (await session.list_tools()).tools])
-            print((await session.call_tool("leave_balance", {"employee_id": "E1002"})).content[0].text)
+    async with (
+        httpx.AsyncClient(headers={"X-Api-Key": os.environ["MCP_KEY"]}) as http_client,
+        streamable_http_client("http://127.0.0.1:8080/mcp", http_client=http_client) as (r, w, _),
+        ClientSession(r, w) as session,
+    ):
+        await session.initialize()
+        print([t.name for t in (await session.list_tools()).tools])
+        result = await session.call_tool("leave_balance", {"employee_id": "E1002"})
+        print(result.isError, result.structuredContent)   # False {'employee_id': 'E1002', ... 'remaining_days': 5.0}
 
 asyncio.run(main())
 ```

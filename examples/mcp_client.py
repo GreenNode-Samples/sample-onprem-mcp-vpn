@@ -11,9 +11,10 @@ Works against the server directly (API key) or through an MCP Gateway (Bearer to
 
 Variables: MCP_URL (required), MCP_API_KEY (sent as X-Api-Key), MCP_BEARER_TOKEN (sent as
 Authorization: Bearer), INSECURE_TLS=1 (skip certificate verification, lab use only).
-"""
 
-from __future__ import annotations
+The tool's result is printed as the server sent it: every content block, then the structured content.
+Exit status: 0 on success, 1 when the call failed or the tool reported an error (`isError`), 2 on bad usage.
+"""
 
 import argparse
 import asyncio
@@ -22,8 +23,16 @@ import os
 import sys
 
 import httpx
-from mcp import ClientSession
-from mcp.client.streamable_http import streamablehttp_client
+from mcp import ClientSession, McpError
+from mcp.client.streamable_http import streamable_http_client
+from mcp.types import CallToolResult
+
+HTTP_STATUS_HINTS = {
+    401: "missing or invalid credentials",
+    403: "denied: check the Policy Group",
+    404: "wrong URL or connector path",
+    503: "server has no usable MCP_API_KEYS",
+}
 
 
 def build_headers() -> dict[str, str]:
@@ -35,50 +44,70 @@ def build_headers() -> dict[str, str]:
     return headers
 
 
-def insecure_client_factory(headers=None, timeout=None, auth=None) -> httpx.AsyncClient:
-    return httpx.AsyncClient(headers=headers, timeout=timeout, auth=auth, verify=False, follow_redirects=True)
+def print_result(result: CallToolResult) -> None:
+    """Print every content block, then the structured content (to stderr when the tool reported an error)."""
+    out = sys.stderr if result.isError else sys.stdout
+    for block in result.content:
+        print(block.text if block.type == "text" else f"[{block.type} content block]", file=out)
+    if result.structuredContent is not None:
+        print("structuredContent:", json.dumps(result.structuredContent, indent=2, ensure_ascii=False), file=out)
 
 
 async def run(url: str, call: str | None, arguments: dict) -> int:
-    kwargs = {"headers": build_headers(), "timeout": 20}
-    if os.environ.get("INSECURE_TLS") == "1":
-        kwargs["httpx_client_factory"] = insecure_client_factory
-    async with streamablehttp_client(url, **kwargs) as (read, write, _):
-        async with ClientSession(read, write) as session:
-            await session.initialize()
-            tools = await session.list_tools()
-            print("tools:", ", ".join(t.name for t in tools.tools))
-            if call:
-                result = await session.call_tool(call, arguments)
-                text = result.content[0].text if result.content else ""
-                try:
-                    print(json.dumps(json.loads(text), indent=2))
-                except ValueError:
-                    print(text)
-                return 1 if result.isError else 0
-    return 0
+    verify = os.environ.get("INSECURE_TLS") != "1"
+    async with (
+        httpx.AsyncClient(headers=build_headers(), timeout=20, verify=verify) as http_client,
+        streamable_http_client(url, http_client=http_client) as (read, write, _),
+        ClientSession(read, write) as session,
+    ):
+        await session.initialize()
+        tools = await session.list_tools()
+        print("tools:", ", ".join(t.name for t in tools.tools))
+        if not call:
+            return 0
+        result = await session.call_tool(call, arguments)
+        print_result(result)
+        return 1 if result.isError else 0
+
+
+def leaf_errors(exc: BaseException) -> list[BaseException]:
+    """Flatten (nested) exception groups: the SDK runs its HTTP transport in task groups that wrap every failure."""
+    members = getattr(exc, "exceptions", None)  # ExceptionGroup, or the `exceptiongroup` backport on Python 3.10
+    if members is None:
+        return [exc]
+    return [leaf for member in members for leaf in leaf_errors(member)]
+
+
+def describe(exc: BaseException) -> str:
+    hint = ""
+    if isinstance(exc, httpx.HTTPStatusError):
+        hint = HTTP_STATUS_HINTS.get(exc.response.status_code, "")
+    elif isinstance(exc, McpError) and str(exc) == "Session terminated":
+        # The SDK reports an HTTP 404 on a request as this error instead of raising httpx.HTTPStatusError.
+        hint = HTTP_STATUS_HINTS[404]
+    return f"{type(exc).__name__}: {exc}" + (f" ({hint})" if hint else "")
 
 
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("--call", help="tool name to call (through a gateway use the exact name from tools/list)")
-    parser.add_argument("--args", default="{}", help='tool arguments as JSON, for example \'{"query":"nguyen"}\'')
+    parser.add_argument("--args", default="{}", help='tool arguments as a JSON object, for example \'{"query":"nguyen"}\'')
     ns = parser.parse_args()
+    try:
+        arguments = json.loads(ns.args)
+    except ValueError:
+        parser.error("--args is not valid JSON")
+    if not isinstance(arguments, dict):
+        parser.error("--args must be a JSON object, for example '{\"query\":\"nguyen\"}'")
     url = os.environ.get("MCP_URL")
     if not url:
         print("Set MCP_URL (see --help).", file=sys.stderr)
         return 2
     try:
-        return asyncio.run(run(url, ns.call, json.loads(ns.args)))
-    except Exception as exc:  # noqa: BLE001 - surface a readable message instead of a traceback
-        while isinstance(exc, BaseExceptionGroup) and exc.exceptions:  # the SDK wraps errors in task groups
-            exc = exc.exceptions[0]
-        hint = ""
-        if isinstance(exc, httpx.HTTPStatusError):
-            code = exc.response.status_code
-            hint = {401: " (missing or invalid credentials)", 403: " (denied: check the Policy Group)",
-                    404: " (wrong URL or connector path)", 503: " (server has no MCP_API_KEYS)"}.get(code, "")
-        print(f"FAILED: {type(exc).__name__}: {exc}{hint}", file=sys.stderr)
+        return asyncio.run(run(url, ns.call, arguments))
+    except Exception as exc:  # show a readable message instead of a traceback
+        for line in dict.fromkeys(describe(leaf) for leaf in leaf_errors(exc)):
+            print(f"FAILED: {line}", file=sys.stderr)
         return 1
 
 

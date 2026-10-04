@@ -5,7 +5,13 @@ so the ASGI lifespan is entered a single time for the whole session. Module sett
 patched per test with monkeypatch and are read by the server on every request.
 """
 
+import json
+import os
+import socket
+import subprocess
 import sys
+import time
+import urllib.request
 from pathlib import Path
 
 import pytest
@@ -86,3 +92,36 @@ def tool_error(call_tool):
         return result["content"][0]["text"]
 
     return call
+
+
+def free_port() -> int:
+    with socket.socket() as s:
+        s.bind(("127.0.0.1", 0))
+        return s.getsockname()[1]
+
+
+@pytest.fixture(scope="session")
+def server_url(tmp_path_factory):
+    """Base URL of a real `python main.py` process (own database, one valid API key) for end-to-end tests."""
+    port = free_port()
+    own = ("MCP_", "ALLOW_ANONYMOUS", "TRUST", "DB_PATH", "HOST", "PORT")
+    env = {k: v for k, v in os.environ.items() if not k.startswith(own)}
+    env.update(HOST="127.0.0.1", PORT=str(port), MCP_API_KEYS=API_KEY,
+               DB_PATH=str(tmp_path_factory.mktemp("db") / "erp.db"))
+    proc = subprocess.Popen([sys.executable, str(SRC / "main.py")], env=env,
+                            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    base = f"http://127.0.0.1:{port}"
+    try:
+        for _ in range(100):
+            try:
+                with urllib.request.urlopen(f"{base}/health", timeout=1) as response:
+                    assert json.load(response) == {"status": "ok", "tools": 6}
+                    break
+            except OSError:
+                time.sleep(0.1)
+        else:
+            pytest.fail("the server process did not start")
+        yield base
+    finally:
+        proc.terminate()
+        proc.wait(timeout=10)
