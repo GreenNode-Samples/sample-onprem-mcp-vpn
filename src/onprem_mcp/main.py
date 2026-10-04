@@ -17,26 +17,35 @@ Tools (all read-only, backed by a local SQLite database seeded with fictional de
 Every tool returns a JSON object (structured output). A failed call raises ToolError, so the MCP result has
 `isError: true` and a plain-text message.
 
-Transport: MCP streamable HTTP at /mcp, health probe at GET /health, port from env PORT (default 8080).
+Transport: MCP streamable HTTP at /mcp, liveness probe at GET /health, port from env PORT (default 8080).
 
 Authentication (fail-closed): /mcp requires an API key.
   - MCP_API_KEYS="key1,key2"  (several keys at once allow zero-downtime rotation)
+  - Every key must be at least 32 characters and must not be an example placeholder. If any entry is
+    rejected, /mcp answers 503 and the reason is logged at startup (the server never falls back to open).
   - Header `X-Api-Key: <key>` or `Authorization: Bearer <key>`
   - No key configured -> /mcp answers 503 (the server never opens itself up). Only for local
     development set ALLOW_ANONYMOUS=true.
-  - /health is always open (load balancers and health probes).
+  - /health is always open (load balancers and health probes) and says nothing but "ok".
   Behind an MCP Gateway connector, Outbound Auth = API Key adds the header `X-Api-Key`; the agent never
   sees the key.
 
-Audit log: every authenticated tools/call is logged as `audit tool=<name> caller=<ip>`.
-Tool arguments and secrets are never logged.
+Audit log: every authenticated tools/call is logged after it completes as
+`audit tool=<name> caller=<ip> key=<sha256 prefix> status=<http status> ms=<duration>`.
+Tool arguments and secrets are never logged; a tool name that is not a plain identifier is logged as <invalid>.
+`caller` is the TCP peer, or the last X-Forwarded-For entry when TRUST_FORWARDED_FOR is on and the peer is one of
+TRUSTED_PROXIES (default: loopback).
 """
 
+import hashlib
+import ipaddress
 import json
 import logging
 import os
+import re
 import secrets
 import sqlite3
+import time
 import unicodedata
 from contextlib import closing
 from datetime import datetime, timedelta, timezone
@@ -48,9 +57,19 @@ from mcp.server.fastmcp.exceptions import ToolError
 from mcp.types import ToolAnnotations
 from pydantic import Field, StringConstraints
 from starlette.responses import JSONResponse
-from starlette.routing import Route
 
-logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
+
+class _SingleLineFormatter(logging.Formatter):
+    """Escape CR/LF inside the message: request data (for example a tool name that the MCP SDK logs when the
+    tool is unknown) must not be able to start a forged log line. Tracebacks stay multi-line."""
+
+    def formatMessage(self, record: logging.LogRecord) -> str:
+        return super().formatMessage(record).replace("\r", "\\r").replace("\n", "\\n")
+
+
+_handler = logging.StreamHandler()
+_handler.setFormatter(_SingleLineFormatter("%(asctime)s %(levelname)s %(name)s: %(message)s"))
+logging.basicConfig(level=logging.INFO, handlers=[_handler])
 log = logging.getLogger("onprem-mcp")
 audit_log = logging.getLogger("onprem-mcp.audit")
 
@@ -61,26 +80,58 @@ audit_log = logging.getLogger("onprem-mcp.audit")
 SERVER_NAME = "onprem-erp-mcp"
 DB_PATH = os.environ.get("DB_PATH", "data/erp.db")
 
+MIN_KEY_LENGTH = 32
+# Values that ship in example files. They are valid-looking strings, so they are rejected by name.
+PLACEHOLDER_KEYS = frozenset({"change-me-run-openssl-rand-hex-32"})
+
 
 def _load_api_keys() -> list[str]:
     raw = os.environ.get("MCP_API_KEYS", "")
     return [k.strip() for k in raw.split(",") if k.strip()]
 
 
+def _key_problems(keys: list[str]) -> list[str]:
+    """Reasons why MCP_API_KEYS cannot be used (empty list = every entry is acceptable). Never contains a key."""
+    problems = []
+    for index, key in enumerate(keys, start=1):
+        if "<" in key or ">" in key:
+            reason = "looks like an unfilled placeholder (contains < or >)"
+        elif key.casefold() in PLACEHOLDER_KEYS:
+            reason = "is a placeholder from an example file"
+        elif len(key) < MIN_KEY_LENGTH:
+            reason = f"is shorter than {MIN_KEY_LENGTH} characters"
+        else:
+            continue
+        problems.append(f"MCP_API_KEYS entry #{index} {reason}; generate one with `openssl rand -hex 32`")
+    return problems
+
+
 def _env_flag(name: str) -> bool:
     return os.environ.get(name, "").strip().lower() in ("1", "true", "yes")
 
 
+def _parse_networks(raw: str) -> list[ipaddress.IPv4Network | ipaddress.IPv6Network]:
+    """Comma-separated IP addresses / CIDR networks; raises ValueError (naming the entry) when one is invalid."""
+    return [ipaddress.ip_network(item.strip(), strict=False) for item in raw.split(",") if item.strip()]
+
+
 API_KEYS = _load_api_keys()
 ALLOW_ANONYMOUS = _env_flag("ALLOW_ANONYMOUS")
-# Only enable when the server sits behind a reverse proxy you control (for example the Caddy TLS profile):
-# the audit log then records the client address from the last X-Forwarded-For entry.
+# Only enable when a reverse proxy you control (for example the Caddy TLS profile) is the ONLY way to reach this
+# server: the audit log then records the client address from the last X-Forwarded-For entry. The header is believed
+# only when the TCP peer is one of TRUSTED_PROXIES (IP addresses or CIDR networks, comma-separated; default:
+# loopback), so a client that connects directly cannot forge its address.
 TRUST_FORWARDED_FOR = _env_flag("TRUST_FORWARDED_FOR")
+TRUSTED_PROXIES = _parse_networks(os.environ.get("TRUSTED_PROXIES", "127.0.0.1,::1"))
 MAX_BODY_BYTES = 1024 * 1024  # request bodies larger than 1 MiB are rejected on /mcp
 
-for _k in API_KEYS:
-    if len(_k) < 24:
-        log.warning("MCP_API_KEYS contains a key shorter than 24 characters; use `openssl rand -hex 32`")
+
+def _log_key_problems() -> None:
+    for problem in _key_problems(API_KEYS):
+        log.error("%s. /mcp answers 503 until this is fixed.", problem)
+
+
+_log_key_problems()
 
 # --------------------------------------------------------------------------------------
 # Database: schema + fictional demo data
@@ -437,33 +488,28 @@ def inventory_level(sku: Sku) -> dict[str, Any]:
     }
 
 
-TOOL_NAMES = ["find_employee", "leave_balance", "sick_leave_balance", "list_purchase_orders", "get_purchase_order", "inventory_level"]
-
 # --------------------------------------------------------------------------------------
 # HTTP app: /mcp (streamable HTTP) + /health, wrapped by audit and fail-closed auth middleware
 # --------------------------------------------------------------------------------------
 
 
 def _auth_mode() -> str:
+    if _key_problems(API_KEYS):
+        return "locked (MCP_API_KEYS rejected, see the errors above)"
     if API_KEYS:
-        return f"api-key ({len(API_KEYS)} key)"
+        return f"api-key ({len(API_KEYS)} key{'s' if len(API_KEYS) > 1 else ''})"
     return "anonymous (ALLOW_ANONYMOUS, local use only)" if ALLOW_ANONYMOUS else "locked (MCP_API_KEYS not set)"
 
 
-async def health(request):
-    return JSONResponse({
-        "status": "ok",
-        "server": SERVER_NAME,
-        "tools": len(TOOL_NAMES),
-        "mcp_endpoint": "/mcp",
-        "mcp_auth": _auth_mode(),
-    })
+@mcp.custom_route("/health", methods=["GET"])
+async def health(_request):
+    """Liveness only: it deliberately reveals nothing about keys, auth mode or tools."""
+    return JSONResponse({"status": "ok"})
 
 
-# streamable_http_app() returns a Starlette app whose lifespan runs the MCP session manager.
-# Add the extra routes to THIS app (mounting it inside another app would skip its lifespan).
+# streamable_http_app() returns a Starlette app (with the custom routes above) whose lifespan runs the MCP
+# session manager; wrap that app, do not mount it inside another one, or the lifespan would be skipped.
 asgi_app = mcp.streamable_http_app()
-asgi_app.router.routes.append(Route("/health", health, methods=["GET"]))
 
 
 def _is_mcp_path(path: str) -> bool:
@@ -492,10 +538,33 @@ def _key_valid(supplied: str) -> bool:
     return ok
 
 
+def _key_fingerprint(key: str) -> str:
+    """First 8 hex digits of sha256(key): tells the audit log WHICH key was used (rotation) without revealing it."""
+    return hashlib.sha256(key.encode()).hexdigest()[:8] if key else "-"
+
+
+def _is_ip(text: str) -> bool:
+    try:
+        ipaddress.ip_address(text)
+    except ValueError:
+        return False
+    return True
+
+
+def _is_trusted_proxy(peer: str) -> bool:
+    return _is_ip(peer) and any(ipaddress.ip_address(peer) in network for network in TRUSTED_PROXIES)
+
+
 def _caller_ip(scope, headers: dict[str, str]) -> str:
+    """The TCP peer, or the last X-Forwarded-For entry when the peer is a trusted proxy.
+
+    uvicorn runs with proxy_headers=False, so this is the only place where X-Forwarded-For is interpreted.
+    """
     peer = (scope.get("client") or ("unknown",))[0]
-    if TRUST_FORWARDED_FOR and headers.get("x-forwarded-for"):
-        return headers["x-forwarded-for"].split(",")[-1].strip() or peer
+    if TRUST_FORWARDED_FOR and _is_trusted_proxy(peer):
+        forwarded = headers.get("x-forwarded-for", "").split(",")[-1].strip()
+        if _is_ip(forwarded):
+            return forwarded
     return peer
 
 
@@ -505,12 +574,19 @@ async def _reply(send, status: int, message: str, extra=()):
     await send({"type": "http.response.body", "body": json.dumps({"error": message}).encode()})
 
 
+async def _reply_jsonrpc_error(send, status: int, code: int, message: str):
+    await send({"type": "http.response.start", "status": status, "headers": [(b"content-type", b"application/json")]})
+    body = {"jsonrpc": "2.0", "id": None, "error": {"code": code, "message": message}}
+    await send({"type": "http.response.body", "body": json.dumps(body).encode()})
+
+
 class RequireApiKeyMiddleware:
     """Fail-closed API key check for /mcp.
 
-    - MCP_API_KEYS set                 -> a valid key is mandatory (401 when missing or wrong).
-    - No key and ALLOW_ANONYMOUS=true  -> open (local development only).
-    - No key and no ALLOW_ANONYMOUS    -> 503, the server never opens itself up.
+    - MCP_API_KEYS has a rejected entry -> 503 (placeholder, too short; see the startup log).
+    - MCP_API_KEYS set                  -> a valid key is mandatory (401 when missing or wrong).
+    - No key and ALLOW_ANONYMOUS=true   -> open (local development only).
+    - No key and no ALLOW_ANONYMOUS     -> 503, the server never opens itself up.
     - /health is always open.
     """
 
@@ -519,6 +595,8 @@ class RequireApiKeyMiddleware:
 
     async def __call__(self, scope, receive, send):
         if scope.get("type") == "http" and _is_mcp_path(scope.get("path", "")):
+            if _key_problems(API_KEYS):
+                return await _reply(send, 503, "MCP_API_KEYS is invalid (fail-closed): see the server log")
             if not API_KEYS:
                 if not ALLOW_ANONYMOUS:
                     return await _reply(send, 503, "MCP server has no MCP_API_KEYS configured (fail-closed)")
@@ -531,24 +609,48 @@ class RequireApiKeyMiddleware:
         await self.app(scope, receive, send)
 
 
-def _tool_calls(body: bytes) -> list[str]:
-    """Tool names of every JSON-RPC `tools/call` message in a request body (single or batch)."""
+# A tool name is logged only when it looks like one; anything else could be crafted to forge log lines.
+TOOL_NAME_RE = re.compile(r"[A-Za-z0-9_.-]{1,64}")
+INVALID_TOOL_NAME = "<invalid>"
+
+
+def _parse_json(body: bytes) -> Any:
+    """Parse a request body; raises ValueError when it is not valid JSON, not valid UTF-8 or nested too deeply.
+
+    An escaped lone surrogate ("\\ud800") also counts as invalid: Python parses it, but it cannot be encoded back to
+    UTF-8, so the MCP SDK would fail with a 500 when it echoes the value in its response.
+    """
     try:
         data = json.loads(body)
-    except ValueError:
-        return []
-    messages = data if isinstance(data, list) else [data]
+        json.dumps(data, ensure_ascii=False).encode("utf-8")  # UnicodeEncodeError is a ValueError
+    except RecursionError as exc:
+        raise ValueError("JSON nested too deeply") from exc
+    return data
+
+
+def _tool_calls(data: Any) -> list[str]:
+    """Log-safe tool names of every JSON-RPC `tools/call` message in a parsed body (single message or batch).
+
+    Never raises. A message of an unexpected shape is skipped, and a tool name that is missing or not a plain
+    identifier is reported as <invalid>: the MCP layer answers the protocol error.
+    """
     names = []
-    for msg in messages:
-        if isinstance(msg, dict) and msg.get("method") == "tools/call":
-            name = (msg.get("params") or {}).get("name")
-            if isinstance(name, str):
-                names.append(name[:64])
+    for message in data if isinstance(data, list) else [data]:
+        if not isinstance(message, dict) or message.get("method") != "tools/call":
+            continue
+        params = message.get("params")
+        name = params.get("name") if isinstance(params, dict) else None
+        names.append(name if isinstance(name, str) and TOOL_NAME_RE.fullmatch(name) else INVALID_TOOL_NAME)
     return names
 
 
 class AuditMiddleware:
-    """Log `tool=<name> caller=<ip>` for every tools/call. Arguments and headers are never logged."""
+    """Log one line per tools/call once the call has completed. Arguments and headers are never logged.
+
+        audit tool=<name> caller=<ip> key=<sha256 prefix of the API key> status=<HTTP status> ms=<duration>
+
+    The status is the HTTP status of the MCP response; a tool that failed still answers 200 with `isError`.
+    """
 
     def __init__(self, app):
         self.app = app
@@ -562,7 +664,7 @@ class AuditMiddleware:
         while True:
             message = await receive()
             if message["type"] != "http.request":
-                break
+                return  # http.disconnect: the client left mid-body, never forward a partial request
             chunk = message.get("body", b"")
             size += len(chunk)
             if size > MAX_BODY_BYTES:
@@ -572,9 +674,11 @@ class AuditMiddleware:
                 break
         body = b"".join(chunks)
 
-        caller = _caller_ip(scope, _headers(scope))
-        for name in _tool_calls(body):
-            audit_log.info("audit tool=%s caller=%s", name, caller)
+        try:
+            data = _parse_json(body)
+        except ValueError:
+            # The MCP SDK would fail on such a body with a 500; answer the JSON-RPC parse error here instead.
+            return await _reply_jsonrpc_error(send, 400, -32700, "Parse error: body is not valid JSON")
 
         replayed = False
 
@@ -585,7 +689,29 @@ class AuditMiddleware:
                 return {"type": "http.request", "body": body, "more_body": False}
             return await receive()
 
-        await self.app(scope, replay, send)
+        status = 0  # stays 0 when the app never starts a response (for example the client went away)
+
+        async def capture_status(message):
+            nonlocal status
+            if message["type"] == "http.response.start":
+                status = message["status"]
+            await send(message)
+
+        headers = _headers(scope)
+        caller = _caller_ip(scope, headers)
+        fingerprint = _key_fingerprint(_extract_key(headers))
+        tools = _tool_calls(data)
+        started = time.monotonic()
+        try:
+            await self.app(scope, replay, capture_status)
+        except Exception:
+            status = status or 500
+            raise
+        finally:
+            elapsed_ms = round((time.monotonic() - started) * 1000)
+            for tool in tools:
+                audit_log.info("audit tool=%s caller=%s key=%s status=%d ms=%d",
+                               tool, caller, fingerprint, status, elapsed_ms)
 
 
 # Order matters: authentication first, so only authenticated callers reach the audit layer.
@@ -593,8 +719,13 @@ app = RequireApiKeyMiddleware(AuditMiddleware(asgi_app))
 
 
 if __name__ == "__main__":
+    import asyncio
+
     import uvicorn
 
     init_db()
-    log.info("%s: %d tools, auth: %s", SERVER_NAME, len(TOOL_NAMES), _auth_mode())
-    uvicorn.run(app, host=os.environ.get("HOST", "0.0.0.0"), port=int(os.environ.get("PORT", "8080")))
+    log.info("%s: %d tools, auth: %s", SERVER_NAME, len(asyncio.run(mcp.list_tools())), _auth_mode())
+    # proxy_headers=False: uvicorn must not rewrite the client address from X-Forwarded-For on its own
+    # (the default trusts 127.0.0.1); _caller_ip() above is the single place that decides.
+    uvicorn.run(app, host=os.environ.get("HOST", "0.0.0.0"), port=int(os.environ.get("PORT", "8080")),
+                proxy_headers=False)

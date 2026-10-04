@@ -190,6 +190,8 @@ exactly the key set in `MCP_API_KEYS` on the on-prem server.
 openssl rand -hex 32     # use the output both in the data center (.env) and here
 ```
 
+The server refuses keys shorter than 32 characters and the placeholders of the example files (`/mcp` then answers `503`).
+
 The gateway attaches this key when it calls the server; agents never see it. For rotation, give the server two keys
 (`MCP_API_KEYS=old,new`), change the provider value to the new key, then remove the old key from the server.
 
@@ -282,7 +284,7 @@ principal syntax against your gateway version.
 6. **Evidence on the data center**: the audit log shows the tool and the real source address of each call, which also
    answers the "is the gateway source NATed" question:
    ```bash
-   docker compose logs mcp | grep audit      # audit tool=find_employee caller=172.30.x.x
+   docker compose logs mcp | grep audit      # audit tool=find_employee caller=172.30.x.x key=1a2b3c4d status=200 ms=4
    ```
    With the Caddy TLS profile set `TRUST_FORWARDED_FOR=true` so the caller is read from `X-Forwarded-For`.
 7. **From an agent**: attach the gateway to the agent (see the AgentBase docs for Agent Runtime, Private mode in the same

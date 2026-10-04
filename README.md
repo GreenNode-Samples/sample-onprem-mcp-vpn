@@ -98,7 +98,7 @@ upgrading this sample, delete the old database (`data/erp.db`, or the `mcp_data`
 Run the server locally, without any network setup:
 
 ```bash
-export MCP_KEY=$(openssl rand -hex 32)          # keep it: the gateway connector will need the same value later
+export MCP_KEY=$(openssl rand -hex 32)          # 32+ characters; keep it: the gateway connector will need the same value later
 docker build -t onprem-mcp-server .
 docker run --rm -p 127.0.0.1:8080:8080 -e MCP_API_KEYS="$MCP_KEY" onprem-mcp-server
 ```
@@ -139,6 +139,10 @@ asyncio.run(main())
 Without Docker: `pip install -r requirements.txt && MCP_API_KEYS="$MCP_KEY" python src/onprem_mcp/main.py`
 (`ALLOW_ANONYMOUS=true` lets you start without a key, for local development only).
 
+Environment variables of the server (all optional except the key; the same list is in [`.env.example`](.env.example)):
+`MCP_API_KEYS`, `ALLOW_ANONYMOUS`, `HOST` (default `0.0.0.0`), `PORT` (default `8080`), `DB_PATH`, `TRUST_FORWARDED_FOR`
+and `TRUSTED_PROXIES`.
+
 ## Step-by-step deployment
 
 | Step | Where | What |
@@ -160,14 +164,14 @@ GreenNode "Support IPSEC Configuration" page and the pfSense demo; see the table
 ## Security checklist
 
 - [ ] **Least-privilege policy**: one Policy Group rule per agent, explicit `erp__<tool>` actions, no `["*"]`. Without any Policy Group, all `tools/call` return 403 by design.
-- [ ] **API key**: generated with `openssl rand -hex 32`, stored in Access Control and in the server `.env` (`chmod 600`), never in git or in agent code. The server is **fail-closed**: no `MCP_API_KEYS` means `503` on `/mcp`.
+- [ ] **API key**: generated with `openssl rand -hex 32`, stored in Access Control and in the server `.env` (`chmod 600`), never in git or in agent code. The server is **fail-closed**: no `MCP_API_KEYS` means `503` on `/mcp`, and so does any key that is shorter than 32 characters, contains `<` or `>`, or is a placeholder from an example file (the reason, never the key, is logged at startup).
 - [ ] **Key rotation without downtime**: list two keys (`MCP_API_KEYS=old,new`), switch the Access Control provider to `new`, then remove `old`.
 - [ ] **Firewall source restriction**: IKE, NAT-T and ESP only from the GreenNode VPN IP; the MCP port only from `172.30.0.0/16` and the VPC CIDR (verify which source the data center really sees); everything else dropped ([`infra/onprem/firewall/nftables.conf`](infra/onprem/firewall/nftables.conf)).
 - [ ] **No exposure**: the server binds to an internal address only (`MCP_BIND_ADDR`), never `0.0.0.0` on a host with a public interface; no public port forwarding.
 - [ ] **TLS**: use the Caddy profile (`https://<host>:8443/mcp`) with a certificate from a CA the gateway trusts; keep plain `:8080` for tests only.
 - [ ] **Strong IPsec**: AEAD or SHA-256 or better, DH group 14 or larger, a long random pre-shared key; avoid the algorithms flagged as weak (`md5`, `sha`, `modp1024` and below).
-- [ ] **Audit logs**: the server logs `audit tool=<name> caller=<ip>` for every tool call (no arguments, no secrets); ship `docker logs` to your SIEM and compare with the gateway audit log. Set `TRUST_FORWARDED_FOR=true` only behind Caddy.
-- [ ] **Container hardening**: non-root user, read-only root filesystem, all capabilities dropped (see `infra/onprem/docker-compose.yml`).
+- [ ] **Audit logs**: after every tool call the server logs `audit tool=<name> caller=<ip> key=<8 hex digits of sha256(key)> status=<HTTP status> ms=<duration>` (no arguments, no secrets; a tool name that is not a plain identifier is logged as `<invalid>`, and log lines cannot be forged with newlines). Ship `docker compose logs mcp` to your SIEM and compare with the gateway audit log. Set `TRUST_FORWARDED_FOR=true` only behind Caddy: the `X-Forwarded-For` header is then believed only for requests that come from `TRUSTED_PROXIES` (default: loopback), never from other clients.
+- [ ] **Container hardening**: non-root user, read-only root filesystem, all capabilities dropped (see `infra/onprem/docker-compose.yml`). `/health` is a liveness probe only and reveals nothing about keys or configuration.
 - [ ] **Network ACL / security groups** tightened after the end-to-end test passes (runbook step e).
 
 ## Troubleshooting
@@ -182,8 +186,8 @@ GreenNode "Support IPSEC Configuration" page and the pfSense demo; see the table
 | Private gateway cannot select the VPC | The VPC is not privately connected to AgentBase yet, or the list is stale | Contact GreenNode support (runbook f); use the refresh icon |
 | Hostname does not resolve | DNS resolution (vDNS) disabled on the VPC, or no DNS path to the data-center resolver | Use the IP in the connector URL, or enable DNS and forward the zone: verify with GreenNode |
 | TLS handshake error at the connector | The certificate is not issued by a CA the gateway trusts, or does not match the host in the URL | Use an enterprise or public CA, match `CADDY_SITE` to the connector host; ask GreenNode about custom CAs |
-| `401` on `/mcp` | Key missing or wrong: the Access Control value differs from `MCP_API_KEYS`, header key is not `X-Api-Key`, or the prefix was left as `Bearer ` | Connector Outbound Auth settings; `docker logs onprem-mcp` (`401 on /mcp from <ip>`) |
-| `503` on `/mcp` | Server has no `MCP_API_KEYS` (fail-closed) | Set the key in `.env` and restart |
+| `401` on `/mcp` | Key missing or wrong: the Access Control value differs from `MCP_API_KEYS`, header key is not `X-Api-Key`, or the prefix was left as `Bearer ` | Connector Outbound Auth settings; `docker compose logs mcp` (`401 on /mcp from <ip>`) |
+| `503` on `/mcp` | Server has no usable `MCP_API_KEYS` (fail-closed): not set, shorter than 32 characters, or still the placeholder of `.env.example` | `docker compose logs mcp` names the rejected entry; put the output of `openssl rand -hex 32` in `.env` and restart |
 | `401` from the gateway endpoint (before the server) | Inbound Auth failed: expired IAM token, wrong JWT issuer or audience | Get a fresh token; check Inbound Auth settings |
 | `403` on `tools/call` (`tools/list` works) | No Policy Group attached, or the principal or `erp__<tool>` action is not allowed | Gateway **Policy** tab; policy changes apply within about 30 seconds |
 | `404` or `Session terminated` | Wrong path: the gateway URL must end with the connector name (`.../erp`) and the connector URL must end with `/mcp` | Re-copy the Endpoint URL from the gateway detail page |
