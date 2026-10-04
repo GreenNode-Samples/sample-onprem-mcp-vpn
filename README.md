@@ -194,6 +194,7 @@ GreenNode "Support IPSEC Configuration" page and the pfSense demo; see the table
 | `404` or `Session terminated` | Wrong path: the gateway URL must end with the connector name (`.../erp`) and the connector URL must end with `/mcp` | Re-copy the Endpoint URL from the gateway detail page |
 | `5xx` from the gateway | The server is unreachable or returned an error | Connectivity from the VPC, server logs, connector endpoint URL and scheme (HTTP vs HTTPS) |
 | Intermittent resets on large responses | MTU / fragmentation through the tunnel | Keep the MSS clamp in `nftables.conf` (1360) |
+| Locked out of SSH right after applying `nftables.conf` | `ADMIN_NET` still has the example value | Fix it from the console (`sudo nft delete table inet onprem_mcp`), set `ADMIN_NET` to your address, apply again |
 
 ## Verify with GreenNode
 

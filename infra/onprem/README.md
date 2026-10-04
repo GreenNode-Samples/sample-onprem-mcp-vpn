@@ -14,7 +14,7 @@ MCP Gateway (AgentBase VPC 172.30.0.0/16)
 | Path | Purpose |
 |---|---|
 | [`strongswan/`](strongswan/README.md) | IPsec peer on Linux: `swanctl.conf`, secrets template, install and verify |
-| [`firewall/nftables.conf`](firewall/nftables.conf) | Example ruleset: IKE / NAT-T / ESP from the GreenNode VPN IP, MCP port only from `172.30.0.0/16` and the VPC CIDR |
+| [`firewall/nftables.conf`](firewall/nftables.conf) | Example ruleset in its own table (`inet onprem_mcp`, other tables such as Docker's are untouched): IKE / NAT-T / ESP from the GreenNode VPN IP, MCP port only from `172.30.0.0/16` and the VPC CIDR, MSS clamp |
 | [`docker-compose.yml`](docker-compose.yml), [`Caddyfile`](Caddyfile), [`.env.example`](.env.example) | Run the MCP server bound to an internal IP, with an optional Caddy TLS profile |
 | [`check_connectivity.sh`](check_connectivity.sh) | TCP, `/health` and authenticated `tools/list` check, run from a host in the customer VPC |
 
@@ -28,6 +28,9 @@ MCP Gateway (AgentBase VPC 172.30.0.0/16)
 4. **Firewall.** Allow IKE (UDP 500), NAT-T (UDP 4500) and ESP only from the GreenNode VPN public IP, and the MCP port
    only from `172.30.0.0/16` and the customer VPC CIDR ([`firewall/nftables.conf`](firewall/nftables.conf)). Whether the
    gateway source address is kept or source-NATed inside the VPC is unconfirmed: verify with GreenNode and open exactly that range.
+   **Set `ADMIN_NET` in the file to the address you SSH from before you apply it**: the input policy is drop, and with
+   the example value you lock yourself out. Check the syntax first (`sudo nft -c -f firewall/nftables.conf`); applying the
+   file again replaces only the `onprem_mcp` table.
 5. **MCP server.**
    ```bash
    cp .env.example .env && chmod 600 .env          # MCP_API_KEYS (openssl rand -hex 32), bind addresses
