@@ -231,9 +231,10 @@ enterprise CA, ask GreenNode how to provide that CA to the connector (verify wit
 ## (j) Policy Group
 
 The gateway denies by default. Actions have the form `<connector>__<tool>`, so the tools of the `erp` connector are
-`erp__find_employee`, `erp__leave_balance`, `erp__list_purchase_orders`, `erp__get_purchase_order` and
-`erp__inventory_level`. List the actions explicitly (least privilege). `["*"]` is the only wildcard and cannot be mixed
-with specific entries.
+`erp__find_employee`, `erp__leave_balance`, `erp__sick_leave_balance`, `erp__list_purchase_orders`,
+`erp__get_purchase_order` and `erp__inventory_level`. List the actions explicitly (least privilege). `["*"]` is the only
+wildcard and cannot be mixed with specific entries. Policies work per tool, which is why sick leave is a tool of its own:
+the HR example below can allow annual leave without exposing sick leave.
 
 Create a Policy Group `onprem-erp-policy` (AgentBase, Policy Groups) with one policy per agent and attach it to the
 gateway (gateway **Edit**, section Policy group; the change applies within about 30 seconds).
@@ -256,7 +257,7 @@ gateway (gateway **Edit**, section Policy group; the change applies within about
 }
 ```
 
-To allow one agent every tool of the connector, list all five actions in a single policy. If you do not know the exact
+To allow one agent every tool of the connector, list all six actions in a single policy. If you do not know the exact
 principal id of the agent, call a tool once, read the denial and the gateway audit log, then write the rule. Verify the
 principal syntax against your gateway version.
 

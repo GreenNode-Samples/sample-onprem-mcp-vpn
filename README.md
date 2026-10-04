@@ -60,17 +60,28 @@ docs/architecture.svg         Architecture diagram (referenced above)
 ### The demo MCP server
 
 A stand-in for an internal enterprise system, backed by SQLite and seeded with fictional data (nothing real).
-All tools are read-only (the database is opened in read-only mode by the tools).
+All tools are read-only (the database is opened in read-only mode by the tools, and the tools carry the MCP
+`readOnlyHint` annotation).
 
 | Tool | Policy action | Description |
 |---|---|---|
-| `find_employee(query)` | `erp__find_employee` | Search the employee directory by name, e-mail or department |
-| `leave_balance(employee_id)` | `erp__leave_balance` | Annual and sick leave balance of one employee |
-| `list_purchase_orders(status)` | `erp__list_purchase_orders` | Purchase orders, filtered by `pending_approval`, `approved`, `received`, `cancelled` or `all` |
+| `find_employee(query)` | `erp__find_employee` | Search the directory by name or department (any letter case, Vietnamese diacritics included): `employee_id`, `name`, `department`, `title` only |
+| `leave_balance(employee_id)` | `erp__leave_balance` | Annual leave balance of one employee for the current calendar year (Asia/Ho_Chi_Minh) |
+| `sick_leave_balance(employee_id)` | `erp__sick_leave_balance` | Sick leave balance, a tool of its own: gateway policies allow or deny whole tools, so a Policy Group can grant annual leave without exposing sick leave |
+| `list_purchase_orders(status)` | `erp__list_purchase_orders` | Purchase orders (newest first), filtered by `pending_approval`, `approved`, `received`, `cancelled` or `all` |
 | `get_purchase_order(po_id)` | `erp__get_purchase_order` | One purchase order with line items and total |
 | `inventory_level(sku)` | `erp__inventory_level` | Stock per warehouse with reorder status |
 
-Inputs are validated (format and length) and every query is parameterized.
+Every tool returns a JSON object (MCP structured output). A failed call, for example an unknown id or an argument that
+breaks the declared schema, is an MCP tool error: the result has `isError: true` and a plain-text message. The two list
+tools return at most 20 rows and say so: `total` is the number of all matches and `truncated` is `true` when rows were
+left out. Money is stored as integer cents, so line totals and order totals are exact and identical in the list and in
+the detail. The e-mail address, manager and location of an employee are deliberately not part of the demo data
+(minimal personal data in tool results).
+
+Arguments are validated by the tool schema on every call (`pattern`, `minLength`/`maxLength`, `enum`) and every query is
+parameterized. The database file is created and seeded when the server starts; to pick up a changed demo schema after
+upgrading this sample, delete the old database (`data/erp.db`, or the `mcp_data` volume).
 
 ## Prerequisites
 
