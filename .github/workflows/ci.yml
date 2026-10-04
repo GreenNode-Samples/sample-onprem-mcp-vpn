@@ -5,8 +5,31 @@ on:
     branches: [main]
   pull_request:
 
+permissions:
+  contents: read
+
 jobs:
   test:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        python-version: ["3.10", "3.12"]
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+          cache: pip
+          cache-dependency-path: requirements*.txt
+
+      - name: Install dependencies
+        run: pip install -r requirements-dev.txt
+
+      - name: Pytest (local server processes on 127.0.0.1, no Internet access needed)
+        run: python -m pytest tests/ -q
+
+  lint-and-infra:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -15,18 +38,18 @@ jobs:
         with:
           python-version: "3.12"
           cache: pip
-          cache-dependency-path: requirements-dev.txt
+          cache-dependency-path: requirements*.txt
 
       - name: Install dependencies
-        run: pip install -r requirements-dev.txt pyyaml
+        run: pip install -r requirements-dev.txt
 
-      - name: Pytest (hermetic, no network)
-        run: python -m pytest tests/ -q
+      - name: Ruff
+        run: ruff check --select F,E9,B,UP,SIM --target-version py312 .
 
-      - name: Shell syntax
+      - name: Shell scripts (syntax and shellcheck)
         run: |
-          bash -n infra/onprem/check_connectivity.sh
-          bash -n lab/lab_setup_onprem.sh
+          bash -n infra/onprem/check_connectivity.sh lab/lab_setup_onprem.sh
+          shellcheck infra/onprem/check_connectivity.sh lab/lab_setup_onprem.sh
 
       - name: YAML syntax
         run: |
@@ -38,5 +61,31 @@ jobs:
               print("ok", f)
           PY
 
-      - name: Docker build
-        run: docker build -t onprem-mcp-server:ci .
+      - name: Docker Compose file
+        run: |
+          cp infra/onprem/.env.example infra/onprem/.env
+          docker compose -f infra/onprem/docker-compose.yml config -q
+          docker compose -f infra/onprem/docker-compose.yml --profile tls config -q
+
+      - name: Caddyfile
+        run: |
+          image=$(docker compose -f infra/onprem/docker-compose.yml --profile tls config --images | grep '^caddy:')
+          docker run --rm -e CADDY_SITE=192.168.10.20 -v "$PWD/infra/onprem/Caddyfile:/etc/caddy/Caddyfile:ro" \
+            "$image" caddy validate --config /etc/caddy/Caddyfile
+
+      - name: nftables syntax (checked by the kernel in a throw-away container, changes nothing)
+        run: |
+          docker run --rm --cap-add NET_ADMIN -v "$PWD/infra/onprem/firewall:/fw:ro" alpine:3.20 \
+            sh -c 'apk add --no-cache nftables >/dev/null && nft -c -f /fw/nftables.conf'
+
+      - name: Docker build and smoke test
+        run: |
+          docker build -t onprem-mcp-server:ci .
+          docker run -d --name smoke -e MCP_API_KEYS="$(openssl rand -hex 32)" -p 127.0.0.1:8080:8080 onprem-mcp-server:ci
+          for _ in $(seq 30); do
+            [ "$(docker inspect -f '{{.State.Health.Status}}' smoke)" = healthy ] && break
+            sleep 2
+          done
+          docker inspect -f '{{.State.Health.Status}}' smoke | grep -x healthy
+          curl -fsS http://127.0.0.1:8080/health
+          test "$(docker exec smoke id -u)" != 0

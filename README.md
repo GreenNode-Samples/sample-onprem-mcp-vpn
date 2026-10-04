@@ -124,6 +124,7 @@ tool reported an error. Or in your own code:
 
 ```python
 import asyncio, os
+import httpx
 from mcp import ClientSession
 from mcp.client.streamable_http import streamable_http_client
 
@@ -223,13 +224,21 @@ before production use:
 
 ```bash
 pip install -r requirements-dev.txt
-python -m pytest tests/ -q          # hermetic: temporary SQLite database, no network
-bash -n infra/onprem/check_connectivity.sh lab/lab_setup_onprem.sh
+python -m pytest tests/ -q          # temporary SQLite databases; needs bash and curl, no Internet access
+ruff check --select F,E9,B,UP,SIM --target-version py312 .
+shellcheck infra/onprem/check_connectivity.sh lab/lab_setup_onprem.sh
+# nftables syntax and kernel check, changes nothing on your host (needs Docker):
+docker run --rm --cap-add NET_ADMIN -v "$PWD/infra/onprem/firewall:/fw:ro" alpine:3.20 \
+  sh -c 'apk add --no-cache nftables >/dev/null && nft -c -f /fw/nftables.conf'
+cp infra/onprem/.env.example infra/onprem/.env && docker compose -f infra/onprem/docker-compose.yml config -q; rm infra/onprem/.env
 ```
 
-The suite covers each tool against a temporary database, input validation (including SQL-injection and LIKE-wildcard
-inputs), the fail-closed API-key middleware (503 / 401 / 200, both header styles, key rotation, `/health` open) and the
-audit log (tool name and caller recorded, no secrets).
+The suite covers each tool through the real MCP HTTP path (schema validation, `isError`, structured output, truncation
+flags), the demo-data rules (Vietnamese case-insensitive search, current-year leave, exact totals, orders whose requester
+is missing), the fail-closed API-key middleware (503 / 401 / 200, placeholder and short keys, both header styles, key
+rotation, minimal `/health`), malformed request bodies (they never cause a 5xx), the audit log (fields, key fingerprint,
+no secrets, log injection, `X-Forwarded-For` trust), `examples/mcp_client.py` and `check_connectivity.sh` against a real
+server process. The same checks run in CI together with `docker build`.
 
 ## Related samples
 
