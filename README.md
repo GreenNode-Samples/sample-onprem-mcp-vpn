@@ -48,7 +48,8 @@ authorized by a Policy Group at the gateway and logged again at the server, and 
 
 ```
 src/onprem_mcp/main.py        MCP server (FastMCP, streamable HTTP /mcp, GET /health), SQLite demo data, API-key auth, audit log
-tests/                        Hermetic pytest suite (tools, input validation, auth middleware, audit log)
+src/onprem_mcp/healthcheck.py Container health probe (the Docker HEALTHCHECK)
+tests/                        pytest suite (tools, input validation, auth middleware, audit log, client example, shell scripts)
 examples/mcp_client.py        Minimal MCP client: direct (API key) or through the gateway (Bearer token)
 Dockerfile, requirements*.txt Container image (non-root) and dependencies
 infra/greennode/README.md     Console runbook: VPC, VPN Site-to-Site, routes, ACL, private connection, gateway, connector, policy
@@ -182,7 +183,7 @@ GreenNode "Support IPSEC Configuration" page and the pfSense demo; see the table
 | Console error 2017 / 2023 when creating the VPN | Overlapping CIDRs between VPC and data center, or between remote sites | Re-plan the CIDRs (never use `172.30.0.0/16`) |
 | Console error 2018 / 2019 / 2020 / 2021 | Remote CIDR is not private, or the remote gateway IP is not a public IP | Use an RFC 1918 CIDR and a public peer IP |
 | Tunnel `ESTABLISHED` but ping and `check_connectivity.sh` fail (step 1) | **Routes missing**: no route for the on-prem CIDR to the VPN gateway in the VPC route table, or no return route on the MCP host | Runbook step d; on the data center add routes for the VPC CIDR **and** `172.30.0.0/16` toward the IPsec peer |
-| `check_connectivity.sh` passes but the gateway times out | Gateway path differs: Route CIDRs do not include the on-prem CIDR, no return route for `172.30.0.0/16`, firewall blocks that source, or the source is NATed to a VPC address | Gateway **Network & Compute** tab; `docker logs onprem-mcp \| grep audit` (shows whether calls arrive and from where); firewall counters |
+| `check_connectivity.sh` passes but the gateway times out | Gateway path differs: Route CIDRs do not include the on-prem CIDR, no return route for `172.30.0.0/16`, firewall blocks that source, or the source is NATed to a VPC address | Gateway **Network & Compute** tab; `docker compose logs mcp \| grep audit` (shows whether calls arrive and from where; in the lab: `docker logs onprem-mcp`); firewall counters |
 | Private gateway cannot select the VPC | The VPC is not privately connected to AgentBase yet, or the list is stale | Contact GreenNode support (runbook f); use the refresh icon |
 | Hostname does not resolve | DNS resolution (vDNS) disabled on the VPC, or no DNS path to the data-center resolver | Use the IP in the connector URL, or enable DNS and forward the zone: verify with GreenNode |
 | TLS handshake error at the connector | The certificate is not issued by a CA the gateway trusts, or does not match the host in the URL | Use an enterprise or public CA, match `CADDY_SITE` to the connector host; ask GreenNode about custom CAs |

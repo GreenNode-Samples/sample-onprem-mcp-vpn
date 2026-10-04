@@ -34,7 +34,12 @@ MCP Gateway (AgentBase VPC 172.30.0.0/16)
    docker compose up -d --build                    # plain HTTP :8080, or
    docker compose --profile tls up -d --build      # Caddy TLS :8443 (set MCP_BIND_ADDR=127.0.0.1 in .env first)
    docker compose ps                               # mcp: healthy
+   docker compose logs mcp                         # startup: "MCP_API_KEYS entry #1 ..." means the key was rejected
    ```
+   The example `.env` ships a placeholder key that the server rejects: until you replace it `/mcp` answers `503`
+   (`/health` stays `ok`, it only reports that the process is alive). With the TLS profile also set
+   `TRUST_FORWARDED_FOR=true` in `.env`, so the audit log shows the caller address that Caddy saw; the compose file
+   restricts that to requests coming from Caddy, so port 8080 cannot be used to forge the address.
    The connector URL documented by GreenNode is an HTTPS URL, so prefer the TLS profile. The certificate must be issued
    by a CA the gateway trusts. How to supply a custom CA to a connector is not in the public docs: verify with GreenNode.
 6. **Check from the customer VPC** (a vServer in the VPC, before creating the connector):

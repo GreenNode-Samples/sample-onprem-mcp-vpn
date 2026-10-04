@@ -286,7 +286,9 @@ principal syntax against your gateway version.
    ```bash
    docker compose logs mcp | grep audit      # audit tool=find_employee caller=172.30.x.x key=1a2b3c4d status=200 ms=4
    ```
-   With the Caddy TLS profile set `TRUST_FORWARDED_FOR=true` so the caller is read from `X-Forwarded-For`.
+   With the Caddy TLS profile set `TRUST_FORWARDED_FOR=true` so the caller is read from `X-Forwarded-For`
+   (the compose file already limits that to requests coming from Caddy). `key` identifies which API key was used
+   (first 8 hex digits of its SHA-256), which helps during key rotation.
 7. **From an agent**: attach the gateway to the agent (see the AgentBase docs for Agent Runtime, Private mode in the same
    VPC when the gateway endpoint is private) and ask a question that needs HR or procurement data.
 

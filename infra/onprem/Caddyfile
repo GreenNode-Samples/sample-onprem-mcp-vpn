@@ -1,11 +1,25 @@
-# TLS reverse proxy for the MCP server (used only with `docker compose --profile tls`).
-# CADDY_SITE is the IP or internal hostname from .env; it must match the host in the connector URL.
+# TLS reverse proxy for the MCP server (used only with `docker compose --profile tls`, and by the lab script).
+# Environment (see .env.example):
+#   CADDY_SITE   IP or internal hostname of this host; it must match the host in the connector URL.
+#   CADDY_BIND   address Caddy listens on (default 0.0.0.0: inside the compose container, where Docker publishes
+#                the port on TLS_BIND_ADDR). The lab script runs Caddy on the host network and sets the LAN address.
+#   MCP_UPSTREAM where the MCP server listens (default: the compose service, mcp:8080).
 {
 	# No public ACME certificates: this host is inside a private network.
 	auto_https disable_redirects
+
+	# Nothing uses the admin API, so do not expose it. Restart the container to apply a changed Caddyfile.
+	admin off
+
+	# Clients that connect to an IP address (the usual connector URL) send no SNI. Caddy would then pick the
+	# certificate by the local address of the connection, which is a container address behind Docker's port
+	# publishing, and the handshake fails. Always answer with the certificate of CADDY_SITE instead.
+	default_sni {$CADDY_SITE}
 }
 
 https://{$CADDY_SITE}:8443 {
+	bind {$CADDY_BIND:0.0.0.0}
+
 	# Certificate issued by Caddy's own internal CA. The MCP Gateway must trust that CA
 	# (root: /data/caddy/pki/authorities/local/root.crt inside the caddy_data volume).
 	# How a custom CA is supplied to a connector is not described in the public docs: verify with GreenNode.
@@ -14,7 +28,6 @@ https://{$CADDY_SITE}:8443 {
 	# Or use a certificate issued by your enterprise CA (mount ./certs in docker-compose.yml):
 	# tls /certs/server.crt /certs/server.key
 
-	# MCP_UPSTREAM defaults to the compose service name; the lab script sets it to <lan-ip>:8080.
 	reverse_proxy {$MCP_UPSTREAM:mcp:8080} {
 		# MCP streamable HTTP: forward data immediately, do not buffer
 		flush_interval -1

@@ -18,6 +18,9 @@ services:
     environment:
       PORT: "8080"
       DB_PATH: /data/erp.db
+      # With TRUST_FORWARDED_FOR=true (TLS profile) the client address is read from X-Forwarded-For, but only
+      # when the request comes from Caddy at its fixed address below.
+      TRUSTED_PROXIES: "172.29.200.250"
     ports:
       # Bind to an internal address only. With the tls profile use MCP_BIND_ADDR=127.0.0.1.
       - "${MCP_BIND_ADDR:?set MCP_BIND_ADDR in .env}:${MCP_PORT:-8080}:8080"
@@ -30,28 +33,21 @@ services:
       - ALL
     security_opt:
       - no-new-privileges:true
-    healthcheck:
-      # python:3.12-slim has no curl, so probe with Python.
-      test:
-        - CMD
-        - python
-        - -c
-        - "import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://127.0.0.1:8080/health', timeout=3).status == 200 else 1)"
-      interval: 30s
-      timeout: 5s
-      retries: 3
-      start_period: 10s
+    # The health check comes from the image (Dockerfile HEALTHCHECK).
 
   # Optional TLS terminator. Enable with `--profile tls`.
   caddy:
     profiles: ["tls"]
-    image: caddy:2
+    image: caddy:2.11.6
     restart: unless-stopped
     depends_on:
       mcp:
         condition: service_healthy
     environment:
       CADDY_SITE: ${CADDY_SITE:?set CADDY_SITE in .env}
+    networks:
+      default:
+        ipv4_address: 172.29.200.250
     ports:
       - "${TLS_BIND_ADDR:?set TLS_BIND_ADDR in .env}:${TLS_PORT:-8443}:8443"
     volumes:
@@ -60,6 +56,14 @@ services:
       # To use a certificate from your enterprise CA instead of `tls internal`:
       # uncomment the next line and the `tls /certs/...` line in the Caddyfile.
       # - ./certs:/certs:ro
+
+networks:
+  default:
+    ipam:
+      config:
+        # A fixed subnet so that the server can recognise Caddy (TRUSTED_PROXIES above). Choose another range
+        # (and change both addresses) if this one is used in your network; it must not overlap 172.30.0.0/16.
+        - subnet: 172.29.200.0/24
 
 volumes:
   mcp_data:

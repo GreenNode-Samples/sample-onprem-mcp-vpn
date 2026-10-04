@@ -9,7 +9,7 @@ WORKDIR /app
 # Build context: repo root (docker build -t onprem-mcp-server .)
 COPY requirements.txt ./requirements.txt
 RUN pip install --no-cache-dir -r requirements.txt
-COPY src/onprem_mcp/main.py ./main.py
+COPY src/onprem_mcp/main.py src/onprem_mcp/healthcheck.py ./
 
 ENV PORT=8080 \
     DB_PATH=/data/erp.db \
@@ -19,7 +19,8 @@ USER mcp
 VOLUME ["/data"]
 EXPOSE 8080
 
+# Probes the address the server is bound to (HOST, default 0.0.0.0 -> 127.0.0.1) and PORT; also used by docker compose.
 HEALTHCHECK --interval=30s --timeout=5s --start-period=10s --retries=3 \
-    CMD python -c "import os,urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://127.0.0.1:%s/health' % os.environ.get('PORT','8080'), timeout=3).status == 200 else 1)"
+    CMD ["python", "healthcheck.py"]
 
 CMD ["python", "main.py"]
